@@ -1,15 +1,21 @@
 # from escpos.constants import QR_ECLEVEL_H
+import os
+import textwrap
 from escpos.printer import Usb
 from datetime import datetime
-import textwrap
+from dotenv import load_dotenv
 
-XP_P503A = (
-    0x0483,
-    0x070B,
-)
-lr = "-" * 32
+load_dotenv()
 
-p = Usb(*XP_P503A, profile="Sunmi-V2")
+id_vendor = os.getenv("ID_VENDOR")
+id_product = os.getenv("ID_PRODUCT")
+if not id_vendor or not id_product:
+    print("Please setup ID_VENDOR and/or ID_PRODUCT of your printer device on .env")
+    exit(1)
+printer_profile = os.getenv("PRINTER_PROFILE")
+p = Usb(int(id_vendor, 16), int(id_product, 16), profile=printer_profile)
+
+lr = "-" * p.profile.get_columns("a")
 
 if not p.is_online():
     print("not online")
@@ -40,4 +46,3 @@ p.textln(lr)
 p.set(align="right", underline=0, bold=False, font="b")
 p.text(datetime.now().strftime("%A %d %b"))
 p.cut()
-
