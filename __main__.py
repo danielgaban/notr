@@ -1,19 +1,42 @@
 # from escpos.constants import QR_ECLEVEL_H
-import os
 import textwrap
-from escpos.printer import Usb
+from configparser import ConfigParser, NoSectionError
 from datetime import datetime
-from dotenv import load_dotenv
+from escpos.printer import Usb
+from platformdirs import user_data_dir
 
-load_dotenv()
+DATA_PATH = user_data_dir("notr", "danielgaban", ensure_exists=True)
+INI_PATH = DATA_PATH + "/cfg.ini"
+cfg = ConfigParser()
+cfg.read(INI_PATH)
+try:
+    cfg.get("settings", "vendor_id")
+    cfg.get("settings", "product_id")
+    cfg.get("settings", "printer_profile")
+except NoSectionError:
+    print("Please setup ID_VENDOR and ID_PRODUCT")
+    cfg.add_section("settings")
+    cfg["settings"]["vendor_id"] = input("ID Vendor: ")
+    try:
+        int(cfg["settings"]["vendor_id"], 16)
+    except ValueError:
+        print("Invalid Vendor ID, exiting...")
+        exit(1)
+    cfg["settings"]["product_id"] = input("ID Product: ")
+    try:
+        int(cfg["settings"]["product_id"], 16)
+    except ValueError:
+        print("Invalid Product ID, exiting...")
+        exit(1)
+    cfg["settings"]["printer_profile"] = input("Printer profile code string: ")
+with open(INI_PATH, "w") as configfile:
+    cfg.write(configfile)
 
-id_vendor = os.getenv("ID_VENDOR")
-id_product = os.getenv("ID_PRODUCT")
-if not id_vendor or not id_product:
-    print("Please setup ID_VENDOR and/or ID_PRODUCT of your printer device on .env")
-    exit(1)
-printer_profile = os.getenv("PRINTER_PROFILE")
-p = Usb(int(id_vendor, 16), int(id_product, 16), profile=printer_profile)
+p = Usb(
+    int(cfg["settings"]["vendor_id"], 16),
+    int(cfg["settings"]["product_id"], 16),
+    profile=cfg["settings"]["printer_profile"],
+)
 
 lr = "-" * p.profile.get_columns("a")
 
