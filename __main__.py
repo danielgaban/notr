@@ -2,12 +2,24 @@
 import textwrap
 from configparser import ConfigParser, NoSectionError
 from datetime import datetime
+import argparse
 from escpos.printer import Usb
 from platformdirs import user_data_dir
 
 DATA_PATH = user_data_dir("notr", "danielgaban", ensure_exists=True)
 INI_PATH = DATA_PATH + "/cfg.ini"
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--clear", action="store_true", help="Clear ini file")
+args = parser.parse_args()
+
 cfg = ConfigParser()
+
+if args.clear:
+    cfg.clear()
+    with open(INI_PATH, "w") as configfile:
+        cfg.write(configfile)
+
 cfg.read(INI_PATH)
 try:
     cfg.get("settings", "vendor_id")
