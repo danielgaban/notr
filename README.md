@@ -8,5 +8,5 @@ This is an python script to print notes to handle adhd easier
 
 ## Build
 
-Compile with `pyinstaller --onefile --add-data ".env:.env" --collect-data=escpos .\__main__.py`
+Compile with `pyinstaller --onefile --collect-data=escpos .\__main__.py`
 
