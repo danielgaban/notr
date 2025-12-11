@@ -1,0 +1,2 @@
+[printers]
+possible_devices = [['/dev/tty.D1', 'dc-0d-51-0b-67-4e']]

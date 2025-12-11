@@ -1,67 +1,10 @@
-# from escpos.constants import QR_ECLEVEL_H
-import textwrap
-from configparser import ConfigParser, NoSectionError
+from time import sleep
 from datetime import datetime
-import argparse
-from escpos.printer import Usb
-from platformdirs import user_data_dir
+from subprocess import run
+from escpos.printer import Serial
+import tomllib
+import textwrap
 
-DATA_PATH = user_data_dir("notr", "danielgaban", ensure_exists=True)
-INI_PATH = DATA_PATH + "/cfg.ini"
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--clear", action="store_true", help="Clear ini file")
-args = parser.parse_args()
-
-cfg = ConfigParser()
-
-if args.clear:
-    cfg.clear()
-    with open(INI_PATH, "w") as configfile:
-        cfg.write(configfile)
-
-cfg.read(INI_PATH)
-try:
-    cfg.get("settings", "vendor_id")
-    cfg.get("settings", "product_id")
-    cfg.get("settings", "printer_profile")
-except NoSectionError:
-    print("Please setup ID_VENDOR and ID_PRODUCT")
-    cfg.add_section("settings")
-    cfg["settings"]["vendor_id"] = input("ID Vendor: ")
-    try:
-        int(cfg["settings"]["vendor_id"], 16)
-    except ValueError:
-        print("Invalid Vendor ID, exiting...")
-        exit(1)
-    cfg["settings"]["product_id"] = input("ID Product: ")
-    try:
-        int(cfg["settings"]["product_id"], 16)
-    except ValueError:
-        print("Invalid Product ID, exiting...")
-        exit(1)
-    cfg["settings"]["printer_profile"] = input("Printer profile code string: ")
-with open(INI_PATH, "w") as configfile:
-    cfg.write(configfile)
-
-p = Usb(
-    int(cfg["settings"]["vendor_id"], 16),
-    int(cfg["settings"]["product_id"], 16),
-    profile=cfg["settings"]["printer_profile"],
-)
-
-lr = "-" * p.profile.get_columns("a")
-
-if not p.is_online():
-    print("not online")
-    exit()
-
-# get params
-prior = int(input("Prior(1-3): "))
-if not (0 < prior <= 3):
-    print(prior)
-    print("invalid prior, exiting")
-    exit()
 note = textwrap.fill(
     input("Note: "), width=32, break_long_words=False, break_on_hyphens=False
 )
@@ -69,15 +12,55 @@ if not note:
     print("no note, exiting")
     exit()
 
-# do print
+with open("config.toml", "rb") as f:
+    config = tomllib.load(f)
+
+_devices = config["printers"]["possible_devices"]
+PORT = _devices[0][0]
+MAC = _devices[0][1]
+
+print("pairing...")
+print(PORT)
+print(MAC)
+run(["blueutil", "--pair", MAC, "0000"], capture_output=True)
+run(["blueutil", "--connect", MAC], capture_output=True)
+
+while True:
+    try:
+        print("trying to connect")
+        # Change the device name to yours
+        p = Serial(
+            devfile=PORT,
+            baudrate=9600,
+            bytesize=8,
+            parity="N",
+            stopbits=1,
+            timeout=10,
+            dsrdtr=True,  # Hardware flow control—often needed for Bluetooth stability
+            xonxoff=False,  # Software flow control—usually off for printers
+        )
+    except Exception as err:
+        print(err)
+    else:
+        break
+
+sleep(1)
 p.ln(3)
-p.set_with_default(align="center", font="a", double_height=True)
-p.textln("!" * prior)
+# p.set_with_default(align="center", font="a", double_height=True)
+# p.qr("bitcoin:bc1qn5yn2mpmzcvky8kme7zep75rcr92t4kw02snj4?amount=0.0037779", size=8)
+# p.image("/Users/danielgaban/Downloads/image.png")
+# exit()
 p.set_with_default(align="center", font="a")
 p.ln(1)
 p.textln(note)
 p.ln(1)
+lr = "-" * p.profile.get_columns("a")
 p.textln(lr)
 p.set(align="right", underline=0, bold=False, font="b")
 p.text(datetime.now().strftime("%A %d %b"))
 p.cut()
+# p.close()
+
+print("unpairing...")
+run(["blueutil", "--unpair", MAC], capture_output=True)
+run(["blueutil", "--disconnect", MAC], capture_output=True)
