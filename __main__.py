@@ -1,81 +1,19 @@
 import argparse
+import asyncio
 import os
 import sys
 import textwrap
 import tomllib
-from subprocess import run
-from time import sleep
 
-from escpos.printer import Serial
-
-# --- Bluetooth lifecycle -----------------------------------------------------
-# The printer is expected to be paired ONCE (manually or on first run). After
-# that we only connect/disconnect, which is much faster and more reliable than
-# re-pairing every run. We never unpair, so the OS keeps the bond.
-
-PAIR_PIN = "0000"
-CONNECT_RETRIES = 5
-PORT_WAIT_SECONDS = 10
-
-
-def _bt(*bargs, text=True):
-    """Run a blueutil command and return the CompletedProcess."""
-    return run(["blueutil", *bargs], capture_output=True, text=text)
-
-
-def is_paired(mac):
-    out = _bt("--paired").stdout or ""
-    return mac.lower() in out.lower()
-
-
-def is_connected(mac):
-    return _bt("--is-connected", mac).stdout.strip() == "1"
-
-
-def ensure_paired(mac):
-    if is_paired(mac):
-        return
-    print("pairing (first time)...")
-    result = _bt("--pair", mac, PAIR_PIN)
-    if result.returncode != 0:
-        print(f"Warning: pairing failed (exit {result.returncode}): {result.stderr.strip()}")
-
-
-def connect(mac, port):
-    """Connect to the printer and wait for its serial node to appear."""
-    ensure_paired(mac)
-
-    for attempt in range(1, CONNECT_RETRIES + 1):
-        if not is_connected(mac):
-            print(f"connecting... (attempt {attempt}/{CONNECT_RETRIES})")
-            _bt("--connect", mac)
-            sleep(1)
-
-        if not is_connected(mac):
-            continue
-
-        # Wait for the rfcomm serial node to be created by the OS.
-        print(f"waiting for {port}...")
-        for _ in range(PORT_WAIT_SECONDS * 2):
-            if os.path.exists(port):
-                print("connected")
-                return
-            sleep(0.5)
-
-        # Connected but no serial node -> bounce the connection and retry.
-        print(f"{port} did not appear, reconnecting...")
-        _bt("--disconnect", mac)
-        sleep(1)
-
-    raise RuntimeError(f"could not connect to {mac} after {CONNECT_RETRIES} attempts")
-
-
-def disconnect(mac):
-    print("disconnecting...")
-    _bt("--disconnect", mac)
-
+from bleak import BleakClient, BleakScanner
+from escpos.printer import Dummy
 
 # --- Config ------------------------------------------------------------------
+
+SCAN_TIMEOUT = 15.0      # seconds to look for the printer while advertising
+CONNECT_RETRIES = 3
+CHUNK_DELAY = 0.02       # pause between BLE writes so the printer keeps up
+DRAIN_SECONDS = 2        # let the printer finish before we disconnect
 
 
 def app_dir():
@@ -88,44 +26,67 @@ def app_dir():
 def load_config():
     path = os.path.join(app_dir(), "config.toml")
     with open(path, "rb") as f:
-        return tomllib.load(f)
+        return tomllib.load(f)["printer"]
 
 
-# --- Printing ----------------------------------------------------------------
+# --- Receipt building (ESC/POS bytes) ----------------------------------------
 
 
-def open_printer(port):
-    p = Serial(
-        devfile=port,
-        baudrate=9600,
-        bytesize=8,
-        parity="N",
-        stopbits=1,
-        timeout=10,
-        dsrdtr=True,
-        xonxoff=False,
-        profile="Sunmi-V2",
-    )
-    # Initialize printer (ESC @) as a connectivity check.
-    p.device.write(b"\x1b\x40")
-    p.device.flush()
-    sleep(0.3)
-    return p
-
-
-def print_note(p, note, qr=None, image=None):
-    width = p.profile.get_columns("a")
+def build_receipt(profile, note, qr=None, image=None):
+    """Render the note to a raw ESC/POS byte stream using a captured printer."""
+    d = Dummy(profile=profile)
+    width = d.profile.get_columns("a")
     note = textwrap.fill(note, width=width, break_long_words=False, break_on_hyphens=False)
 
-    p.ln(2)
-    p.set_with_default(align="center", font="a")
+    d.ln(2)
+    d.set_with_default(align="center", font="a")
     if qr:
-        p.qr(qr, size=8)
+        d.qr(qr, size=8)
     if image:
-        p.image(image)
-    p.textln(note)
-    p.textln("-" * width)
-    p.cut()
+        d.image(image)
+    d.textln(note)
+    d.textln("-" * width)
+    d.cut()
+    return d.output
+
+
+# --- BLE transport -----------------------------------------------------------
+
+
+async def find_printer(name):
+    """Return the BLE device whose advertised name starts with `name`."""
+    def match(dev, adv):
+        advertised = dev.name or adv.local_name or ""
+        return advertised.upper().startswith(name.upper())
+
+    return await BleakScanner.find_device_by_filter(match, timeout=SCAN_TIMEOUT)
+
+
+async def send(device, write_char, data):
+    async with BleakClient(device) as client:
+        chunk = max(20, client.mtu_size - 3)
+        for i in range(0, len(data), chunk):
+            await client.write_gatt_char(write_char, data[i:i + chunk], response=False)
+            await asyncio.sleep(CHUNK_DELAY)
+        await asyncio.sleep(DRAIN_SECONDS)
+
+
+async def print_bytes(name, write_char, data):
+    print(f"scanning for '{name}'...")
+    device = await find_printer(name)
+    if device is None:
+        raise RuntimeError(f"printer '{name}' not found (is it on and in range?)")
+
+    for attempt in range(1, CONNECT_RETRIES + 1):
+        try:
+            print(f"connecting ({attempt}/{CONNECT_RETRIES})...")
+            await send(device, write_char, data)
+            print("printed")
+            return
+        except Exception as e:
+            print(f"  attempt failed: {e}")
+            await asyncio.sleep(1)
+    raise RuntimeError(f"could not print after {CONNECT_RETRIES} attempts")
 
 
 # --- Entry point -------------------------------------------------------------
@@ -138,21 +99,14 @@ def main():
     parser.add_argument("--image", type=str, help="Image source")
     args = parser.parse_args()
 
-    config = load_config()
-    port, mac = config["printers"]["possible_devices"][0]
+    cfg = load_config()
+    data = build_receipt(cfg["profile"], args.note, qr=args.qr, image=args.image)
 
-    connect(mac, port)
-    p = None
     try:
-        p = open_printer(port)
-        print_note(p, args.note, qr=args.qr, image=args.image)
-    finally:
-        if p is not None:
-            try:
-                p.close()
-            except Exception:
-                pass
-        disconnect(mac)
+        asyncio.run(print_bytes(cfg["name"], cfg["write_char"], data))
+    except RuntimeError as e:
+        print(e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

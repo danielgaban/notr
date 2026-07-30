@@ -1,2 +1,8 @@
-[printers]
-possible_devices = [['/dev/tty.D1', 'dc-0d-51-0b-67-4e']]
+[printer]
+# BLE advertised name of the thermal printer (macOS identifies BLE by UUID, so
+# we match on name rather than MAC address).
+name = "D1"
+profile = "Sunmi-V2"
+# BLE serial-passthrough characteristic that accepts raw ESC/POS bytes
+# (service 0x18F0). Fallback on this model: 49535343-8841-43f4-a8d4-ecbe34729bb3
+write_char = "00002af1-0000-1000-8000-00805f9b34fb"
